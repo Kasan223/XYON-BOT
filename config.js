@@ -17,7 +17,7 @@ global.maxwarn = '2' // Peringatan maksimum
 global.antiporn = true // Auto delete pesan porno (bot harus admin)
 
 //INI WAJIB DI ISI!//
-global.lann = 'Kasan.7'
+global.lann = ''
 global.aksesKey = '' // Register dan buy 
 //Daftar terlebih dahulu https://api.betabotz.eu.org
 
