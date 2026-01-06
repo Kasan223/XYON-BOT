@@ -1,78 +1,101 @@
+Process.env.NODE_TLS_REJECT_UNAUTHORIZED = '1';
+
 (async () => {
-  require('./config')
+  require('./config');
+  
   const {
     useMultiFileAuthState,
     DisconnectReason,
-    fetchLatestBaileysVersion,
+    generateForwardMessageContent,
+    prepareWAMessageMedia,
+    generateWAMessageFromContent,
+    generateMessageID,
+    downloadContentFromMessage,
     makeCacheableSignalKeyStore,
-    jidNormalizedUser
-  } = require("@adiwajshing/baileys")
-  const pino = require('pino')
-  const WebSocket = require('ws')
-  const path = require('path')
-  const fs = require('fs')
-  const yargs = require('yargs/yargs')
-  const cp = require('child_process')
-  const _ = require('lodash')
-  const syntaxerror = require('syntax-error')
-  const os = require('os')
-  const readline = require('readline')
-
-  let simple = require('./lib/simple')
-  var low
+    makeInMemoryStore,
+    jidDecode,
+    fetchLatestBaileysVersion,
+    proto,
+    Browsers
+  } = await import('@adiwajshing/baileys');
+  
+  const NodeCache = require('node-cache');
+  const pino = require('pino');
+  const WebSocket = require('ws');
+  const path = require('path');
+  const fs = require('fs');
+  const os = require('os');
+  const yargs = require('yargs/yargs');
+  const childProcess = require('child_process');
+  const lodash = require('lodash');
+  const syntaxError = require('syntax-error');
+  const chalk = require('chalk');
+  let simple = require('./lib/simple');
+  
+  var lowdb;
   try {
-    low = require('lowdb')
+    lowdb = require('lowdb');
   } catch (e) {
-    low = require('./lib/lowdb')
+    lowdb = require('./lib/lowdb');
   }
-  const { Low, JSONFile } = low
-  const mongoDB = require('./lib/mongoDB')
-
-  // Helper untuk Pairing Code
-  const question = (text) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout
-    });
-    return new Promise((resolve) => {
-      rl.question(text, (answer) => {
-        rl.close();
-        resolve(answer);
-      });
-    });
-  };
-
-  global.API = (name, path = '/', query = {}, apikeyqueryname) => (name in global.APIs ? global.APIs[name] : name) + path + (query || apikeyqueryname ? '?' + new URLSearchParams(Object.entries({
-    ...query,
-    ...(apikeyqueryname ? {
-      [apikeyqueryname]: global.APIKeys[name in global.APIs ? global.APIs[name] : name]
-    } : {})
-  })) : '')
-
+  
+  const { Low, JSONFile } = lowdb;
+  const mongoDB = require('./lib/mongoDB');
+  const readline = require('readline');
+  
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+  
+  const question = (query) => new Promise(resolve => rl.question(query, resolve));
+  
+  // Global API helper
+  global.API = (name, path = '/', query = {}, apikey) => 
+    (name in global.APIs ? global.APIs[name] : name) + path + 
+    (query || apikey ? '?' + new URLSearchParams(Object.entries({
+      ...query,
+      ...(apikey ? { [apikey]: global.APIKeys[name in global.APIs ? global.APIs[name] : name] } : {})
+    })) : '');
+  
   global.timestamp = {
-    start: new Date
-  }
-
-  const PORT = process.env.PORT || 3000
-
-  global.opts = new Object(yargs(process.argv.slice(2)).exitProcess(false).parse())
-  global.prefix = new RegExp('^[' + (opts['prefix'] || '‎xzXZ/i!#$%+£¢€¥^°=¶∆×÷π√✓©®:;?&.\\-').replace(/[|\\{}()[\]^$+*?.\-\^]/g, '\\$&') + ']')
-
+    start: new Date()
+  };
+  
+  global.opts = new Object(yargs(process.argv.slice(2)).exitProcess(false).parse());
+  
+  global.prefix = new RegExp('^[' + 
+    (opts.prefix || '‎xzXZ/i!#$%+£¢€¥^°=¶∆×÷π√✓©®:;?&.\\-')
+      .replace(/[|\\{}()[\]^$+*?.\-\^]/g, '\\$&') + ']');
+  
+  // Database setup
   global.db = new Low(
-    /https?:\/\//.test(opts['db'] || '') ?
-    new cloudDBAdapter(opts['db']) : /mongodb/.test(opts['db']) ?
-    new mongoDB(opts['db']) :
-    new JSONFile(`${opts._[0] ? opts._[0] + '_' : ''}database.json`)
-  )
-  global.DATABASE = global.db
+    /https?:\/\//.test(opts.db || '') ? 
+      new cloudDBAdapter(opts.db) : 
+      /mongodb/.test(opts.db) ? 
+        new mongoDB(opts.db) : 
+        new JSONFile((opts._[0] ? opts._[0] + '_' : '') + 'database.json')
+  );
+  
+  global.DATABASE = global.db;
+  
   global.loadDatabase = async function loadDatabase() {
-    if (global.db.READ) return new Promise((resolve) => setInterval(function() {
-      (!global.db.READ ? (clearInterval(this), resolve(global.db.data == null ? global.loadDatabase() : global.db.data)) : null)
-    }, 1 * 1000))
-    if (global.db.data !== null) return
-    global.db.READ = true
-    await global.db.read()
-    global.db.READ = false
+    if (global.db.READ) {
+      return new Promise(resolve => 
+        setInterval(function() {
+          if (!global.db.READ) {
+            clearInterval(this);
+            resolve(global.db.data == null ? global.loadDatabase() : global.db.data);
+          }
+        }, 1000)
+      );
+    }
+    
+    if (global.db.data !== null) return;
+    
+    global.db.READ = true;
+    await global.db.read();
+    global.db.READ = false;
     global.db.data = {
       users: {},
       chats: {},
@@ -80,122 +103,240 @@
       msgs: {},
       sticker: {},
       ...(global.db.data || {})
-    }
-    global.db.chain = _.chain(global.db.data)
-  }
-  loadDatabase()
-
-  const authFile = `${opts._[0] || 'sessions'}`
-  global.isInit = !fs.existsSync(authFile)
-  const { state, saveCreds } = await useMultiFileAuthState(authFile)
-  const { version } = await fetchLatestBaileysVersion()
-
-  // --- CONFIG KONEKSI ---
+    };
+    global.db.chain = lodash.chain(global.db.data);
+  };
+  
+  loadDatabase();
+  
+  // Browser configuration
+  var getBrowser = function(browser = 'Chrome') {
+    const platform = os.platform();
+    const system = platform === 'win32' ? 'Windows' : 
+                   platform === 'darwin' ? 'MacOS' : 'Linux';
+    const release = system === 'Linux' ? Browsers.ubuntu(browser)[2] : 'N/A';
+    return [system, browser, release];
+  };
+  
+  const sessionPath = '' + (opts._[0] || 'sessions');
+  global.isInit = !fs.existsSync(sessionPath);
+  
+  const { state, saveState, saveCreds } = await useMultiFileAuthState(sessionPath);
+  const { version, isLatest } = await fetchLatestBaileysVersion();
+  
+  console.log(chalk.magenta(`-- using WA v${version.join('.')}, isLatest: ${isLatest} --`));
+  
+  const msgRetryCache = new NodeCache();
+  const groupCache = new NodeCache({
+    stdTTL: 300,
+    useClones: false
+  });
+  
   const connectionOptions = {
-    printQRInTerminal: !opts['pairing'], // QR tidak muncul jika mode pairing aktif
+    printQRInTerminal: false,
     syncFullHistory: true,
     markOnlineOnConnect: true,
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 0,
     keepAliveIntervalMs: 10000,
     generateHighQualityLinkPreview: true,
-    auth: {
-        creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
+    patchMessageBeforeSending: (message) => {
+      const requiresPatch = !!(
+        message.buttonsMessage || 
+        message.templateMessage || 
+        message.listMessage
+      );
+      
+      if (requiresPatch) {
+        message = {
+          viewOnceMessage: {
+            message: {
+              messageContextInfo: {
+                deviceListMetadataVersion: 2,
+                deviceListMetadata: {}
+              },
+              ...message
+            }
+          }
+        };
+      }
+      return message;
     },
-    browser: ['Ubuntu', 'Chrome', '20.0.04'],
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, pino().child({
+        level: 'silent',
+        stream: 'store'
+      }))
+    },
+    cachedGroupMetadata: async (jid) => groupCache.get(jid),
+    msgRetryCounterCache: msgRetryCache,
+    browser: getBrowser(),
     logger: pino({ level: 'silent' }),
-    version,
+    version: version
+  };
+  
+  global.conn = simple.makeWASocket(connectionOptions);
+  
+  // Auto-save database
+  if (!opts.test) {
+    if (global.db) {
+      setInterval(async () => {
+        if (global.db.data) {
+          await global.db.write();
+        }
+        if (!opts.tmp && (global.support || {}).find) {
+          tmp = [os.tmpdir(), 'tmp'];
+          tmp.forEach(dir => 
+            childProcess.spawn('find', [dir, '-amin', '3', '-type', 'f', '-delete'])
+          );
+        }
+      }, 30000);
+    }
   }
-
-  global.conn = simple.makeWASocket(connectionOptions)
-
-  // --- LOGIKA PAIRING CODE ---
-  if (opts['pairing'] && !conn.authState.creds.registered) {
-      console.log(`\n🔹 Menunggu Pairing Code...`);
-      setTimeout(async () => {
-          let phoneNumber = await question('📞 Masukkan Nomor WhatsApp Bot (Cth: 628xxx): ');
-          phoneNumber = phoneNumber.replace(/[^0-9]/g, '')
-          let code = await conn.requestPairingCode(phoneNumber)
-          code = code?.match(/.{1,4}/g)?.join("-") || code
-          console.log(`\n🔑 KODE PAIRING: \x1b[32m${code}\x1b[0m\n`);
-      }, 3000)
-  }
-
-  if (!opts['test']) {
-    if (global.db) setInterval(async () => {
-      if (global.db.data) await global.db.write()
-      if (!opts['tmp'] && (global.support || {}).find) (tmp = [os.tmpdir(), 'tmp'], tmp.forEach(filename => cp.spawn('find', [filename, '-amin', '3', '-type', 'f', '-delete'])))
-    }, 30 * 1000)
-  }
-
+  
   async function connectionUpdate(update) {
-    const { connection, lastDisconnect } = update
-    global.timestamp.connect = new Date
-    if (lastDisconnect && lastDisconnect.error && lastDisconnect.error.output && lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut && conn.ws.readyState !== WebSocket.CONNECTING) {
-      console.log(global.reloadHandler(true))
+    const { connection, lastDisconnect } = update;
+    global.timestamp.connect = new Date();
+    
+    if (lastDisconnect && lastDisconnect.error && 
+        lastDisconnect.error.output && 
+        lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut && 
+        conn.ws.readyState !== WebSocket.CONNECTING) {
+      console.log(global.reloadHandler(true));
     }
-    if (global.db.data == null) await loadDatabase()
+    
+    if (global.db.data == null) {
+      await loadDatabase();
+    }
     if (connection === 'open') {
-        console.log('✅ Bot Berhasil Terhubung!');
+        console.log(chalk.green('✅ Bot Berhasil Terhubung!'));
     }
   }
-
-  process.on('uncaughtException', console.error)
-
-  const imports = (path) => {
-    path = require.resolve(path)
-    let modules, retry = 0
-    do {
-      if (path in require.cache) delete require.cache[path]
-      modules = require(path)
-      retry++
-    } while ((!modules || (Array.isArray(modules) || modules instanceof String) ? !(modules || []).length : typeof modules == 'object' && !Buffer.isBuffer(modules) ? !(Object.keys(modules || {})).length : true) && retry <= 10)
-    return modules
+  
+  // Check for existing credentials
+  if (fs.existsSync('./sessions/creds.json') && !conn.authState.creds.registered) {
+    console.log(chalk.yellow('-- WARNING: creds.json is broken, please delete it first --'));
+    process.exit(0);
   }
-
-  let isInit = true
+  
+  // Pairing code setup
+  if (!conn.authState.creds.registered) {
+    let phoneNumber = '';
+    
+    do {
+      phoneNumber = await question(
+        chalk.blueBright('ENTER A VALID NUMBER START WITH REGION CODE. Example : 62xxx:\n')
+      );
+      
+      if (!/^\d+$/.test(phoneNumber) || phoneNumber.length < 10) {
+        console.log(chalk.red("Invalid phone number. Please enter a valid number."));
+      }
+    } while (!/^\d+$/.test(phoneNumber) || phoneNumber.length < 10);
+    
+    rl.close();
+    phoneNumber = phoneNumber.replace(/\D/g, '');
+    
+    console.log(chalk.bgWhite(chalk.blue('-- Please wait, generating code... --')));
+    
+    setTimeout(async () => {
+      let code = 'XYONBOTZ';
+      let pairingCode = await conn.requestPairingCode(phoneNumber, code);
+      pairingCode = pairingCode?.match(/.{1,4}/g)?.join('-') || pairingCode;
+      console.log(
+        chalk.black(chalk.bgGreen('Your Pairing Code : ')),
+        chalk.black(chalk.white(pairingCode))
+      );
+    }, 3000);
+  }
+  
+  process.on('uncaughtException', console.error);
+  
+  // Plugin reloader helper
+  const reloadFile = (file) => {
+    file = require.resolve(file);
+    let reload;
+    let retryCount = 0;
+    
+    do {
+      if (file in require.cache) {
+        delete require.cache[file];
+      }
+      reload = require(file);
+      retryCount++;
+    } while (
+      (!reload || 
+       Array.isArray(reload) || 
+       reload instanceof String ? 
+         !(reload || []).length : 
+         typeof reload == 'object' && !Buffer.isBuffer(reload) ? 
+           !Object.keys(reload || {}).length : 
+           true
+      ) && retryCount <= 10
+    );
+    
+    return reload;
+  };
+  
+  let isInit = true;
+  
   global.reloadHandler = function(restatConn) {
-    let handler = imports('./handler')
+    let handler = reloadFile('./handler');
+    
     if (restatConn) {
-      try { global.conn.ws.close() } catch {}
+      try {
+        global.conn.ws.close();
+      } catch {}
+      
       global.conn = {
         ...global.conn,
         ...simple.makeWASocket(connectionOptions)
-      }
+      };
     }
+    
     if (!isInit) {
-      conn.ev.off('messages.upsert', conn.handler)
-      conn.ev.off('group-participants.update', conn.participantsUpdate)
-      conn.ev.off('message.delete', conn.onDelete)
-      conn.ev.off('connection.update', conn.connectionUpdate)
-      conn.ev.off('creds.update', conn.credsUpdate)
+      conn.ev.off('messages.upsert', conn.handler);
+      conn.ev.off('group-participants.update', conn.participantsUpdate);
+      conn.ev.off('message.delete', conn.onDelete);
+      conn.ev.off('connection.update', conn.connectionUpdate);
+      conn.ev.off('creds.update', conn.credsUpdate);
     }
-
-    conn.welcome = 'Welcome @user 👋 In Groups @subject\nDont Forget To Obey The Existing Rules'
-    conn.bye = 'Goodbye @user 👋'
-    conn.promote = '@user sekarang admin!'
-    conn.demote = '@user sekarang bukan admin!'
-    conn.handler = handler.handler.bind(conn)
-    conn.participantsUpdate = handler.participantsUpdate.bind(conn)
-    conn.onDelete = handler.delete.bind(conn)
-    conn.connectionUpdate = connectionUpdate.bind(conn)
-    conn.credsUpdate = saveCreds.bind(conn)
-
-    conn.ev.on('messages.upsert', conn.handler)
-    conn.ev.on('group-participants.update', conn.participantsUpdate)
-    conn.ev.on('message.delete', conn.onDelete)
-    conn.ev.on('connection.update', conn.connectionUpdate)
-    conn.ev.on('creds.update', conn.credsUpdate)
-    isInit = false
-    return true
-  }
-
-  // --- RECURSIVE PLUGIN LOADER (BACA FOLDER BERTINGKAT) ---
-  let pluginFolder = path.join(__dirname, 'plugins')
+    
+    conn.welcome = 'Selamat datang @user di group @subject utamakan baca desk ya \n@desc';
+    conn.bye = 'Selamat tinggal @user 👋';
+    conn.promote = '@user sekarang admin!';
+    conn.demote = '@user sekarang bukan admin!';
+    conn.handler = handler.handler.bind(conn);
+    
+    conn.ev.on('call', async (call) => {
+      console.log('Panggilan diterima:', call);
+      if (call.status === 'ringing') {
+        await conn.rejectCall(call.id);
+        console.log('Panggilan ditolak');
+      }
+    });
+    
+    conn.participantsUpdate = handler.participantsUpdate.bind(conn);
+    conn.onDelete = handler.delete.bind(conn);
+    conn.connectionUpdate = connectionUpdate.bind(conn);
+    conn.credsUpdate = saveCreds.bind(conn);
+    
+    conn.ev.on('messages.upsert', conn.handler);
+    conn.ev.on('group-participants.update', conn.participantsUpdate);
+    conn.ev.on('message.delete', conn.onDelete);
+    conn.ev.on('connection.update', conn.connectionUpdate);
+    conn.ev.on('creds.update', conn.credsUpdate);
+    
+    isInit = false;
+    return true;
+  };
   
+  // --- RECURSIVE PLUGIN LOADER (START) ---
+  let pluginsFolder = path.join(__dirname, 'plugins');
+  
+  // Fungsi Helper untuk scan folder secara rekursif
   const getAllFiles = (dirPath, arrayOfFiles) => {
-      files = fs.readdirSync(dirPath)
+      let files = fs.readdirSync(dirPath)
       arrayOfFiles = arrayOfFiles || []
       files.forEach(function(file) {
           if (fs.statSync(dirPath + "/" + file).isDirectory()) {
@@ -207,79 +348,98 @@
       return arrayOfFiles
   }
 
-  global.plugins = {}
-  let pluginFiles = getAllFiles(pluginFolder)
+  global.plugins = {};
   
+  // Load plugins using getAllFiles (Recursive)
+  let pluginFiles = getAllFiles(pluginsFolder)
   for (let filename of pluginFiles) {
     try {
-      global.plugins[filename] = require(filename)
+      global.plugins[filename] = require(filename);
     } catch (e) {
-      conn.logger.error(e)
-      delete global.plugins[filename]
+      conn.logger.error(e);
+      delete global.plugins[filename];
     }
   }
   
-  console.log(`🧩 Total ${Object.keys(global.plugins).length} Plugins Terload (Recursive)`)
-
-  global.reload = (_ev, filename) => {
-    // Logic reload disederhanakan untuk stabilitas
-    if (/\.js$/.test(filename)) {
-      let dir = path.join(pluginFolder, filename) // Note: ini mungkin perlu penyesuaian jika filename absolute
-      // Untuk watcher sederhana, kita gunakan path absolute dari event
-      if (fs.existsSync(filename)) { // Jika filename dari watcher adalah path absolute
-         dir = filename
-      } 
+  console.log(chalk.green(`🧩 Total ${Object.keys(global.plugins).length} Plugins Terload (Recursive)`));
+  
+  global.reload = (event, filename) => {
+    if (filename && /\.js$/.test(filename)) {
+      // Handle path join differently if filename comes from watcher
+      // If filename is absolute (from initial load), use it. If relative (from watcher), join it.
+      let dir = path.join(pluginsFolder, filename); 
+      if (fs.existsSync(filename)) dir = filename; // Check if it's already a full path
       
       if (dir in require.cache) {
-        delete require.cache[dir]
-        if (fs.existsSync(dir)) conn.logger.info(`re - require plugin '${path.basename(dir)}'`)
-        else {
-          conn.logger.warn(`deleted plugin '${path.basename(dir)}'`)
-          return delete global.plugins[dir]
+        delete require.cache[dir];
+        if (fs.existsSync(dir)) {
+          conn.logger.info("re - require plugin '" + path.basename(dir) + "'");
+        } else {
+          conn.logger.warn("deleted plugin '" + path.basename(dir) + "'");
+          return delete global.plugins[dir];
         }
-      } else conn.logger.info(`requiring new plugin '${path.basename(dir)}'`)
+      } else {
+        conn.logger.info("requiring new plugin '" + path.basename(dir) + "'");
+      }
       
-      let err = syntaxerror(fs.readFileSync(dir), dir)
-      if (err) conn.logger.error(`syntax error while loading '${path.basename(dir)}'\n${err}`)
-      else try {
-        global.plugins[dir] = require(dir)
-      } catch (e) {
-        conn.logger.error(e)
-      } finally {
-        global.plugins = Object.fromEntries(Object.entries(global.plugins).sort(([a], [b]) => a.localeCompare(b)))
+      let err = syntaxError(fs.readFileSync(dir), dir);
+      if (err) {
+        conn.logger.error("syntax error while loading '" + path.basename(dir) + "'\n" + err);
+      } else {
+        try {
+          global.plugins[dir] = require(dir);
+        } catch (e) {
+          conn.logger.error(e);
+        } finally {
+          global.plugins = Object.fromEntries(
+              Object.entries(global.plugins).sort(([a], [b]) => a.localeCompare(b))
+          );
+        }
       }
     }
-  }
+  };
   
-  Object.freeze(global.reload)
-  fs.watch(pluginFolder, { recursive: true }, global.reload) // Enable Recursive Watch
-  global.reloadHandler()
-
-  // Quick Test
-  async function _quickTest() {
-    let test = await Promise.all([
-      cp.spawn('ffmpeg'),
-      cp.spawn('ffprobe'),
-      cp.spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-filter_complex', 'color', '-frames:v', '1', '-f', 'webp', '-']),
-      cp.spawn('convert'),
-      cp.spawn('magick'),
-      cp.spawn('gm'),
-      cp.spawn('find', ['--version'])
-    ].map(p => {
+  Object.freeze(global.reload);
+  // Enable Recursive Watcher
+  fs.watch(pluginsFolder, { recursive: true }, global.reload);
+  global.reloadHandler();
+  // --- RECURSIVE PLUGIN LOADER (END) ---
+  
+  // Check dependencies
+  async function checkDependencies() {
+    let results = await Promise.all([
+      childProcess.spawn('ffmpeg'),
+      childProcess.spawn('ffprobe'),
+      childProcess.spawn('ffmpeg', [
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-filter_complex', 'color',
+        '-frames:v', '1',
+        '-f', 'webp',
+        '-'
+      ]),
+      childProcess.spawn('convert'),
+      childProcess.spawn('magick'),
+      childProcess.spawn('gm'),
+      childProcess.spawn('find', ['--version'])
+    ].map(proc => {
       return Promise.race([
         new Promise(resolve => {
-          p.on('close', code => {
-            resolve(code !== 127)
-          })
+          proc.on('close', code => {
+            resolve(code !== 127);
+          });
         }),
         new Promise(resolve => {
-          p.on('error', _ => resolve(false))
+          proc.on('error', err => resolve(false));
         })
-      ])
-    }))
-    let [ffmpeg, ffprobe, ffmpegWebp, convert, magick, gm, find] = test
-    // console.log(test)
-    let s = global.support = {
+      ]);
+    }));
+    
+    let [ffmpeg, ffprobe, ffmpegWebp, convert, magick, gm, find] = results;
+    
+    // console.log(results);
+    
+    let support = global.support = {
       ffmpeg,
       ffprobe,
       ffmpegWebp,
@@ -287,11 +447,29 @@
       magick,
       gm,
       find
+    };
+    
+    Object.freeze(global.support);
+    
+    if (!support.ffmpeg) {
+      conn.logger.warn('Please install ffmpeg for sending videos (pkg install ffmpeg)');
     }
-    Object.freeze(global.support)
+    
+    if (support.ffmpeg && !support.ffmpegWebp) {
+      conn.logger.warn(
+        'Stickers may not animated without libwebp on ffmpeg (--enable-ibwebp while compiling ffmpeg)'
+      );
+    }
+    
+    if (!support.convert && !support.magick && !support.gm) {
+      conn.logger.warn(
+        'Stickers may not work without imagemagick if libwebp on ffmpeg doesnt isntalled (pkg install imagemagick)'
+      );
+    }
   }
-
-  _quickTest()
+  
+  checkDependencies()
     .then(() => conn.logger.info('✅ Quick Test Done'))
-    .catch(console.error)
-})()
+    .catch(console.error);
+})();
+      
