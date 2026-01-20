@@ -1,6 +1,6 @@
 {
-    "name": "rtxzy",
-    "version": "8.0.2",
+    "name": "XYON",
+    "version": "1.0",
     "description": "Lightweight WhatsApp Bot",
     "depecrated": false,
     "main": "index.js",
@@ -26,20 +26,20 @@
         "botcahx",
         "baileys"
     ],
-    "homepage": "https://github.com/BOTCAHX/RTXZY-MD",
+    "homepage": "https://github.com/Shanove7/XYON-BOT",
     "author": {
-        "name": "BOTCAHX"
+        "name": "Shanove7"
     },
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/BOTCAHX/RTXZY-MD.git"
+        "url": "git+https://github.com/Shanove7/XYON-BOT.git"
     },
     "bugs": {
-        "url": "https://github.com/BOTCAHX/RTXZY-MD/issues"
+        "url": "https://github.com/Shanove7/XYON-BOT/issues"
     },
     "license": "MIT",
     "dependencies": {
-        "@adiwajshing/baileys": "npm:baileys@6.7.21",
+        "@adiwajshing/baileys": "npm:@neoxr/baileys"",
         "@adiwajshing/keyed-db": "^0.2.4",
         "@vitalets/google-translate-api": "^9.0.0",
         "async": "^3.2.4",
